@@ -1,0 +1,37 @@
+# Secrets and local environment
+.env
+**/.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Hardhat
+node_modules/
+artifacts/
+cache/
+
+# Generated/runtime outputs
+training_batches/
+downloaded_ipfs_files/
+test_downloaded_ipfs_files/
+*.log
+
+# Local datasets and generated CSV outputs
+DeepSeek-VL/
+ipfs_cid_outputs/
+new_information.csv
+scripts.zip
+
+# Large thesis dataset folder: keep only downloader code committed below.
+JailBreakV_28K/**
+!JailBreakV_28K/
+!JailBreakV_28K/JailBreakV_28k/
+!JailBreakV_28K/JailBreakV_28k/ipfs_cid_outputs/
+!JailBreakV_28K/JailBreakV_28k/ipfs_cid_outputs/download_ipfs_from_csv.py
+!JailBreakV_28K/JailBreakV_28k/ipfs_cid_outputs/run_downloader.bat

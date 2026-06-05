@@ -1,0 +1,9 @@
+node_modules/
+artifacts/
+cache/
+.env
+training_batches/
+*.log
+__pycache__/
+*.pyc
+

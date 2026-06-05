@@ -1,0 +1,21 @@
+{
+  "name": "threat-ledger-sepolia",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sepolia threat ledger demo storing IPFS manifest CIDs on-chain.",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "manifest:info": "hardhat run scripts/manifest-info.js",
+    "register:sepolia": "hardhat run scripts/register-manifest.js --network sepolia",
+    "confirm:sepolia": "hardhat run scripts/confirm-manifest.js --network sepolia",
+    "latest:sepolia": "hardhat run scripts/read-latest.js --network sepolia"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.4.7",
+    "hardhat": "^2.22.19"
+  }
+}
+
