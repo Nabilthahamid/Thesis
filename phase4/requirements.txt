@@ -1,0 +1,14 @@
+torch
+transformers>=4.43
+accelerate
+peft>=0.10
+bitsandbytes
+datasets
+Pillow
+tqdm
+sentencepiece
+timm
+einops
+attrdict
+safetensors
+

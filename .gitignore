@@ -20,6 +20,7 @@ cache/
 training_batches/
 downloaded_ipfs_files/
 test_downloaded_ipfs_files/
+phase4_outputs/
 *.log
 
 # Local datasets and generated CSV outputs
