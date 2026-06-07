@@ -62,6 +62,16 @@ def parse_args():
     parser.add_argument("--timeout", type=int, default=60, help="Timeout per IPFS gateway request.")
     parser.add_argument("--retries", type=int, default=2, help="Retry rounds across all gateways.")
     parser.add_argument("--limit", type=int, default=0, help="Download only first N rows per manifest. 0 means all.")
+    parser.add_argument(
+        "--all-confirmed",
+        action="store_true",
+        help="Process every unprocessed confirmed version. Default is latest confirmed version only.",
+    )
+    parser.add_argument(
+        "--skip-training",
+        action="store_true",
+        help="Download and verify only; do not run TRAINING_COMMAND.",
+    )
     return parser.parse_args()
 
 
@@ -344,14 +354,28 @@ def process_version(contract, version, output_dir, args):
 
             if result["status"] == "failed":
                 failed += 1
-            print(f"[v{version} {index}/{len(rows)}] id={record_id} {result['status']}")
+            status_text = result["status"]
+            if result["status"] == "failed" and result.get("error"):
+                status_text = f"{status_text}: {result['error']}"
+            print(f"[v{version} {index}/{len(rows)}] id={record_id} {status_text}")
 
     if failed:
         print(f"Version {version} has {failed} failed download(s). Training was not started.")
         return False
 
-    run_training_command(os.environ.get("TRAINING_COMMAND", "").strip(), version_dir, manifest_path, version)
+    if args.skip_training:
+        print(f"Skipping training command for version {version}.")
+    else:
+        run_training_command(os.environ.get("TRAINING_COMMAND", "").strip(), version_dir, manifest_path, version)
     return True
+
+
+def versions_to_process(last_processed, latest_confirmed, all_confirmed):
+    if latest_confirmed <= last_processed:
+        return []
+    if all_confirmed:
+        return range(last_processed + 1, latest_confirmed + 1)
+    return [latest_confirmed]
 
 
 def main():
@@ -366,10 +390,26 @@ def main():
         last_processed = int(state.get("last_processed_version", 0))
         latest_confirmed = int(contract.functions.latestConfirmedVersion().call())
 
-        if latest_confirmed <= last_processed:
+        versions = versions_to_process(last_processed, latest_confirmed, args.all_confirmed)
+
+        if not versions:
             print(f"No new confirmed manifests. last_processed={last_processed}, latest_confirmed={latest_confirmed}")
         else:
-            for version in range(last_processed + 1, latest_confirmed + 1):
+            if not args.all_confirmed:
+                if last_processed == 0:
+                    print(f"Latest-only mode: processing latest confirmed manifest version {latest_confirmed}.")
+                elif latest_confirmed > last_processed + 1:
+                    skipped_from = last_processed + 1
+                    skipped_to = latest_confirmed - 1
+                    print(
+                        "Latest-only mode: "
+                        f"skipping historical versions {skipped_from}-{skipped_to} "
+                        f"and processing version {latest_confirmed}."
+                    )
+                else:
+                    print(f"Latest-only mode: processing latest confirmed manifest version {latest_confirmed}.")
+
+            for version in versions:
                 print(f"Processing confirmed manifest version {version}")
                 if process_version(contract, version, output_dir, args):
                     state["last_processed_version"] = version

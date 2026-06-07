@@ -442,7 +442,7 @@ The daemon is the automated bridge between blockchain/IPFS and training.
 Run once:
 
 ```powershell
-python daemon\threat_daemon.py --once
+python daemon\threat_daemon.py --once --skip-training
 ```
 
 Run continuously:
@@ -451,6 +451,22 @@ Run continuously:
 python daemon\threat_daemon.py --poll-interval 60
 ```
 
+Default behavior:
+
+```text
+The daemon downloads only the latest confirmed blockchain version.
+If latest confirmed version = 2, a new machine downloads version_2 directly.
+```
+
+Historical mode:
+
+```powershell
+python daemon\threat_daemon.py --once --all-confirmed --skip-training
+```
+
+Use historical mode only when you intentionally want to replay old confirmed
+versions such as version 1, then version 2.
+
 Daemon steps:
 
 ```text
@@ -458,7 +474,7 @@ Daemon steps:
 2. Connect to Sepolia
 3. Read latestConfirmedVersion
 4. Compare with daemon_state.json
-5. For each unprocessed confirmed version:
+5. Download the latest confirmed version, unless --all-confirmed is used:
    a. Read manifest CID from blockchain
    b. Download manifest CSV from IPFS
    c. Verify manifest SHA-256
@@ -481,10 +497,6 @@ Expected batch structure:
 ```text
 training_batches\
   daemon_state.json
-  version_1\
-    manifest.csv
-    download_report.csv
-    files\
   version_2\
     manifest.csv
     download_report.csv
@@ -519,8 +531,7 @@ If it does not exist, clear TRAINING_COMMAND before running the daemon.
 Download-only test:
 
 ```powershell
-$env:TRAINING_COMMAND=""
-python daemon\threat_daemon.py --once
+python daemon\threat_daemon.py --once --skip-training
 ```
 
 ## 14. Why The Daemon Did Not Run Automatically
@@ -634,4 +645,3 @@ Use separate owner and approver wallets.
 ## 17. One-Sentence Thesis Summary
 
 The system stores attack data in IPFS and stores only verified manifest fingerprints on Sepolia; an approval-controlled smart contract marks trusted versions, and a daemon watches the chain to download, verify, and prepare newly confirmed datasets for training.
-

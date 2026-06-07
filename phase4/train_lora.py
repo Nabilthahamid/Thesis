@@ -174,6 +174,10 @@ def choose_dtype(args: argparse.Namespace) -> torch.dtype:
     return torch.float32
 
 
+def safe_console_text(value: Any) -> str:
+    return str(value).encode("ascii", errors="backslashreplace").decode("ascii")
+
+
 def import_deepseek_and_hf(deepseek_vl_path: str) -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     add_deepseek_to_path(deepseek_vl_path or None)
     from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
@@ -230,7 +234,7 @@ def load_base_model(args: argparse.Namespace, dtype: torch.dtype) -> tuple[Any, 
                 use_gradient_checkpointing=args.gradient_checkpointing,
             )
         except Exception as exc:
-            print(f"Warning: prepare_model_for_kbit_training failed: {exc}")
+            print(f"Warning: prepare_model_for_kbit_training failed: {safe_console_text(exc)}")
 
     if args.resume_adapter:
         model = PeftModel.from_pretrained(model, args.resume_adapter, is_trainable=True)
@@ -252,7 +256,7 @@ def load_base_model(args: argparse.Namespace, dtype: torch.dtype) -> tuple[Any, 
         try:
             core.language_model.gradient_checkpointing_enable()
         except Exception as exc:
-            print(f"Warning: could not enable language gradient checkpointing: {exc}")
+            print(f"Warning: could not enable language gradient checkpointing: {safe_console_text(exc)}")
 
     return model, processor
 
@@ -285,11 +289,28 @@ def model_device(model: Any) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def move_batch(batch: Batch, device: torch.device, dtype: torch.dtype) -> dict[str, Any]:
+def module_float_dtype(module: Any, fallback: torch.dtype) -> torch.dtype:
+    if module is None:
+        return fallback
+    for parameter in module.parameters():
+        if parameter.is_floating_point():
+            return parameter.dtype
+    for buffer in module.buffers():
+        if buffer.is_floating_point():
+            return buffer.dtype
+    return fallback
+
+
+def vision_input_dtype(model: Any, fallback: torch.dtype) -> torch.dtype:
+    core = cast(Any, get_model_core(model))
+    return module_float_dtype(getattr(core, "vision_model", None), fallback)
+
+
+def move_batch(batch: Batch, device: torch.device, dtype: torch.dtype, image_dtype: torch.dtype) -> dict[str, Any]:
     return {
         "input_ids": batch.input_ids.to(device),
         "attention_mask": batch.attention_mask.to(device),
-        "pixel_values": batch.pixel_values.to(device=device, dtype=dtype),
+        "pixel_values": batch.pixel_values.to(device=device, dtype=image_dtype),
         "images_seq_mask": batch.images_seq_mask.to(device),
         "images_emb_mask": batch.images_emb_mask.to(device),
         "labels": batch.labels.to(device),
@@ -344,13 +365,20 @@ def forward_loss(model: Any, batch: dict[str, Any]) -> torch.Tensor:
 
 
 @torch.no_grad()
-def evaluate_loss(model: Any, dataloader: Any, device: torch.device, dtype: torch.dtype, max_batches: int) -> float:
+def evaluate_loss(
+    model: Any,
+    dataloader: Any,
+    device: torch.device,
+    dtype: torch.dtype,
+    image_dtype: torch.dtype,
+    max_batches: int,
+) -> float:
     model.eval()
     losses: list[float] = []
     for batch_index, batch in enumerate(dataloader):
         if max_batches > 0 and batch_index >= max_batches:
             break
-        moved = move_batch(batch, device, dtype)
+        moved = move_batch(batch, device, dtype, image_dtype)
         loss = forward_loss(model, moved)
         losses.append(float(loss.detach().cpu()))
     model.train()
@@ -389,8 +417,10 @@ def main() -> int:
 
     model, processor = load_base_model(args, dtype)
     device = model_device(get_model_core(model))
+    image_dtype = vision_input_dtype(model, dtype)
     param_summary = trainable_parameter_summary(model)
     print(f"Trainable parameters: {param_summary}")
+    print(f"Model dtype: {dtype}; image dtype: {image_dtype}")
 
     train_dataset = SftJsonlDataset(Path(args.train_jsonl), args.max_train_samples)
     val_dataset = SftJsonlDataset(Path(args.val_jsonl), args.max_val_samples)
@@ -418,6 +448,7 @@ def main() -> int:
     run_config.update(
         {
             "dtype": str(dtype),
+            "image_dtype": str(image_dtype),
             "train_jsonl_sha256": sha256_jsonl(Path(args.train_jsonl)),
             "val_jsonl_sha256": sha256_jsonl(Path(args.val_jsonl)),
             "train_samples": len(train_dataset),
@@ -440,7 +471,7 @@ def main() -> int:
         optimizer_steps = 0
 
         for batch_index, batch in enumerate(progress, start=1):
-            moved = move_batch(batch, device, dtype)
+            moved = move_batch(batch, device, dtype, image_dtype)
             loss = forward_loss(model, moved) / max(1, args.grad_accum_steps)
             loss.backward()
             running_loss += float(loss.detach().cpu()) * max(1, args.grad_accum_steps)
@@ -464,7 +495,7 @@ def main() -> int:
                 if args.max_steps > 0 and global_step >= args.max_steps:
                     break
 
-        val_loss = evaluate_loss(model, val_loader, device, dtype, args.max_val_batches)
+        val_loss = evaluate_loss(model, val_loader, device, dtype, image_dtype, args.max_val_batches)
         epoch_metrics = {
             "epoch": epoch,
             "global_step": global_step,
@@ -488,7 +519,7 @@ def main() -> int:
     try:
         processor.save_pretrained(str(output_dir / "processor"))
     except Exception as exc:
-        print(f"Warning: processor save failed: {exc}")
+        print(f"Warning: processor save failed: {safe_console_text(exc)}")
 
     save_json(
         output_dir / "training_metrics.json",

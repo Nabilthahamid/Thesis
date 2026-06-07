@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
+import hashlib
 import json
+import mimetypes
 import os
 import subprocess
 import sys
@@ -15,7 +18,7 @@ from typing import Any
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from phase4.common import DEFAULT_ATTACK_IMAGE_ROOT, DEFAULT_OUTPUT_ROOT, save_json  # noqa: E402
+from phase4.common import DEFAULT_ATTACK_IMAGE_ROOT, DEFAULT_OUTPUT_ROOT, save_json, sha256_file, write_jsonl  # noqa: E402
 
 
 PREFERRED_FIELDS = [
@@ -50,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         default=int(os.environ.get("PHASE4_GRAD_ACCUM_STEPS", "8") or "8"),
     )
     parser.add_argument("--learning-rate", default=os.environ.get("PHASE4_LEARNING_RATE", "2e-4"))
+    parser.add_argument(
+        "--run-train",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("PHASE4_RUN_TRAIN", "1") == "1",
+    )
     parser.add_argument("--run-eval", action=argparse.BooleanOptionalAction, default=os.environ.get("PHASE4_RUN_EVAL", "0") == "1")
     parser.add_argument("--judge", default=os.environ.get("PHASE4_JUDGE", "heuristic"))
     parser.add_argument("--dry-run", action="store_true")
@@ -88,6 +96,131 @@ def write_attack_csv(rows: list[dict[str, Any]], path: Path) -> None:
             writer.writerow(output)
 
 
+def safe_filename(value: str) -> str:
+    value = str(value or "row")
+    return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in value) or "row"
+
+
+def image_suffix(image_payload: dict[str, Any]) -> str:
+    file_name = str(image_payload.get("file_name") or "")
+    suffix = Path(file_name).suffix
+    if suffix:
+        return suffix
+    mime_type = str(image_payload.get("mime_type") or "")
+    return mimetypes.guess_extension(mime_type) or ".bin"
+
+
+def is_phase4_json_row(row: dict[str, Any]) -> bool:
+    required = {"sample_id", "kind", "split", "image", "prompt", "answer"}
+    return required.issubset(row.keys()) and isinstance(row.get("image"), dict)
+
+
+def is_phase4_json_batch(rows: list[dict[str, Any]]) -> bool:
+    return bool(rows) and all(is_phase4_json_row(row) for row in rows[: min(len(rows), 20)])
+
+
+def source_from_flat_fields(row: dict[str, Any]) -> dict[str, Any]:
+    source: dict[str, Any] = {}
+    for key, value in row.items():
+        if not key.startswith("source_"):
+            continue
+        if value in ("", None):
+            continue
+        source[key.removeprefix("source_")] = value
+    return source
+
+
+def write_embedded_image(row: dict[str, Any], image_dir: Path, row_id: str) -> Path:
+    image_payload = row.get("image")
+    if not isinstance(image_payload, dict):
+        raise ValueError(f"Row {row_id} has no embedded image object")
+
+    encoded = image_payload.get("data_base64")
+    if not encoded:
+        raise ValueError(f"Row {row_id} image object has no data_base64 field")
+
+    image_bytes = base64.b64decode(str(encoded), validate=True)
+    expected_sha = str(image_payload.get("sha256") or "").lower()
+    actual_sha = hashlib.sha256(image_bytes).hexdigest()
+    if expected_sha and actual_sha != expected_sha:
+        raise ValueError(f"Row {row_id} image SHA mismatch: expected {expected_sha}, got {actual_sha}")
+
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_path = image_dir / f"{safe_filename(row_id)}{image_suffix(image_payload)}"
+    if not image_path.exists() or image_path.read_bytes() != image_bytes:
+        image_path.write_bytes(image_bytes)
+    return image_path.resolve()
+
+
+def materialize_phase4_json_batch(
+    rows: list[dict[str, Any]],
+    data_dir: Path,
+    batch_dir: Path,
+    manifest_path: str,
+    version: str,
+) -> dict[str, Any]:
+    split_rows: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
+    image_root = data_dir / "images"
+
+    for index, row in enumerate(rows):
+        row_id = str(row.get("sample_id") or row.get("id") or f"row:{index}")
+        split = str(row.get("split") or "").strip()
+        if split not in split_rows:
+            raise ValueError(f"Row {row_id} has unsupported split {split!r}")
+
+        kind = str(row.get("kind") or "unknown")
+        image_path = write_embedded_image(row, image_root / split / kind, row_id)
+        output_row: dict[str, Any] = {
+            "id": row_id,
+            "kind": kind,
+            "split": split,
+            "image": str(image_path),
+            "prompt": row.get("prompt", ""),
+            "answer": row.get("answer", ""),
+        }
+        if row.get("intent_key"):
+            output_row["intent_key"] = row["intent_key"]
+
+        source = source_from_flat_fields(row)
+        if source:
+            output_row["source"] = source
+        if row.get("_ipfs_upload_metadata"):
+            output_row["ledger_upload_metadata"] = row["_ipfs_upload_metadata"]
+
+        split_rows[split].append(output_row)
+
+    jsonl_paths: dict[str, str] = {}
+    jsonl_sha256: dict[str, str] = {}
+    counts: dict[str, dict[str, int]] = {}
+    for split, split_items in split_rows.items():
+        jsonl_path = data_dir / f"{split}.jsonl"
+        write_jsonl(jsonl_path, split_items)
+        jsonl_paths[split] = str(jsonl_path.resolve())
+        jsonl_sha256[split] = sha256_file(jsonl_path)
+
+        attack_count = sum(1 for item in split_items if item.get("kind") == "attack")
+        benign_count = sum(1 for item in split_items if item.get("kind") == "benign")
+        counts[split] = {
+            "attack": attack_count,
+            "benign": benign_count,
+            "total": len(split_items),
+        }
+
+    metadata = {
+        "source": "threat-ledger-ipfs-batch",
+        "version": version,
+        "batch_dir": str(batch_dir.resolve()),
+        "manifest_path": manifest_path,
+        "row_count": len(rows),
+        "image_root": str(image_root.resolve()),
+        "counts": counts,
+        "jsonl_paths": jsonl_paths,
+        "jsonl_sha256": jsonl_sha256,
+    }
+    save_json(data_dir / "dataset_metadata.json", metadata)
+    return metadata
+
+
 def run_command(command: list[str], dry_run: bool) -> None:
     print(" ".join(command), flush=True)
     if not dry_run:
@@ -106,22 +239,30 @@ def main() -> int:
     adapter_dir = output_root / "adapters" / version_label
     eval_dir = output_root / "eval" / version_label
 
-    rows = load_batch_rows(Path(args.batch_dir).expanduser().resolve())
+    batch_dir = Path(args.batch_dir).expanduser().resolve()
+    rows = load_batch_rows(batch_dir)
     attack_csv = work_dir / "attack_rows.csv"
-    write_attack_csv(rows, attack_csv)
 
-    prepare_command = [
-        sys.executable,
-        str(Path(__file__).with_name("prepare_sft_data.py")),
-        "--attack-csv",
-        str(attack_csv),
-        "--attack-image-root",
-        args.attack_image_root,
-        "--output-dir",
-        str(data_dir),
-    ]
-    if args.max_attacks > 0:
-        prepare_command.extend(["--max-attacks", str(args.max_attacks)])
+    if is_phase4_json_batch(rows):
+        metadata = materialize_phase4_json_batch(rows, data_dir, batch_dir, args.manifest_path, args.version)
+        prepare_command = []
+        prepared_from = "embedded_phase4_json_rows"
+    else:
+        write_attack_csv(rows, attack_csv)
+        prepare_command = [
+            sys.executable,
+            str(Path(__file__).with_name("prepare_sft_data.py")),
+            "--attack-csv",
+            str(attack_csv),
+            "--attack-image-root",
+            args.attack_image_root,
+            "--output-dir",
+            str(data_dir),
+        ]
+        if args.max_attacks > 0:
+            prepare_command.extend(["--max-attacks", str(args.max_attacks)])
+        metadata = {}
+        prepared_from = "raw_attack_rows"
 
     train_command = [
         sys.executable,
@@ -161,13 +302,20 @@ def main() -> int:
             "adapter_dir": str(adapter_dir),
             "eval_dir": str(eval_dir),
             "row_count": len(rows),
+            "prepared_from": prepared_from,
+            "run_train": args.run_train,
+            "dataset_metadata": metadata,
         },
     )
 
-    run_command(prepare_command, args.dry_run)
-    run_command(train_command, args.dry_run)
+    if prepare_command:
+        run_command(prepare_command, args.dry_run)
+    if args.run_train:
+        run_command(train_command, args.dry_run)
+    else:
+        print("Skipping LoRA training because --no-run-train or PHASE4_RUN_TRAIN=0 is set.", flush=True)
 
-    if args.run_eval:
+    if args.run_eval and args.run_train:
         eval_command = [
             sys.executable,
             str(Path(__file__).with_name("eval_attacks.py")),
@@ -187,6 +335,8 @@ def main() -> int:
         if args.deepseek_vl_path:
             eval_command.extend(["--deepseek-vl-path", args.deepseek_vl_path])
         run_command(eval_command, args.dry_run)
+    elif args.run_eval:
+        print("Skipping evaluation because training was skipped.", flush=True)
 
     print(f"Phase 4 batch pipeline finished for version {args.version}")
     return 0
@@ -194,4 +344,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

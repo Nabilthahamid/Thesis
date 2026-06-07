@@ -130,7 +130,9 @@ def retry_rpc(label, callback, retries, retry_delay):
             if attempt < retries:
                 print(f"RPC read failed during {label}; retrying {attempt}/{retries - 1}: {exc}")
                 time.sleep(retry_delay)
-    raise last_error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"RPC read failed during {label}; no retry attempts were made")
 
 
 def find_pending_manifests(contract, retries, retry_delay):

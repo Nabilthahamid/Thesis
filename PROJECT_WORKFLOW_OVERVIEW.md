@@ -177,7 +177,9 @@ The daemon is:
 threat-ledger-sepolia/daemon/threat_daemon.py
 ```
 
-It watches the blockchain for confirmed manifests. When it finds a new confirmed
+It watches the blockchain for confirmed manifests. By default it downloads only
+the latest confirmed version, so a new machine receives the newest dataset
+snapshot instead of replaying older versions. When it finds a newer confirmed
 version, it:
 
 ```text
@@ -199,6 +201,10 @@ threat-ledger-sepolia/training_batches/version_<n>/
 
 If `.env` contains `TRAINING_COMMAND`, the daemon can automatically trigger
 Phase 4 training after a verified batch is downloaded.
+
+A new blockchain version means a new confirmed manifest was added. In this
+thesis workflow, that manifest can represent the latest book or dataset update;
+the daemon treats the newest confirmed manifest as the trusted current snapshot.
 
 ## 5. Phase 4: Model Hardening With LoRA
 
@@ -590,4 +596,3 @@ Do claim:
 The LoRA hardening pipeline reduced attack success from 14.5% to 0.0% on the
 held-out test split in the completed 1.3B local experiment.
 ```
-

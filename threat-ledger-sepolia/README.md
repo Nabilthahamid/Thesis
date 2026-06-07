@@ -101,13 +101,23 @@ npm run latest:sepolia
 Run once:
 
 ```powershell
-python daemon\threat_daemon.py --once
+python daemon\threat_daemon.py --once --skip-training
 ```
 
 Run continuously:
 
 ```powershell
 python daemon\threat_daemon.py --poll-interval 60
+```
+
+By default the daemon downloads only the latest confirmed blockchain version.
+For the current deployed demo, that means a new machine downloads version 2
+directly instead of downloading version 1 first.
+
+To intentionally download every unprocessed historical version, use:
+
+```powershell
+python daemon\threat_daemon.py --once --all-confirmed --skip-training
 ```
 
 The daemon writes batches here:

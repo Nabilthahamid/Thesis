@@ -136,6 +136,23 @@ def model_device(model: Any) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def module_float_dtype(module: Any, fallback: torch.dtype) -> torch.dtype:
+    if module is None:
+        return fallback
+    for parameter in module.parameters():
+        if parameter.is_floating_point():
+            return parameter.dtype
+    for buffer in module.buffers():
+        if buffer.is_floating_point():
+            return buffer.dtype
+    return fallback
+
+
+def vision_input_dtype(model: Any, fallback: torch.dtype) -> torch.dtype:
+    core = cast(Any, get_model_core(model))
+    return module_float_dtype(getattr(core, "vision_model", None), fallback)
+
+
 @torch.no_grad()
 def generate_response(model, processor, sample: dict[str, Any], dtype: torch.dtype, args: argparse.Namespace) -> str:
     core = cast(Any, get_model_core(model))
@@ -151,6 +168,7 @@ def generate_response(model, processor, sample: dict[str, Any], dtype: torch.dty
     )
     device = model_device(model)
     prepared = prepared.to(device, dtype=dtype)
+    prepared.pixel_values = prepared.pixel_values.to(device=device, dtype=vision_input_dtype(model, dtype))
     inputs_embeds = core.prepare_inputs_embeds(**prepared)
     generate_kwargs = {
         "inputs_embeds": inputs_embeds,
